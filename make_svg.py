@@ -24,7 +24,7 @@ assert _HB_SHAPE.is_file()
 
 _NEED_SVG = (
     ("abc", Path(__file__).parent / "build/Font.ttf", "abc.svg"),
-    ("﴾صباغ﴿", _REPO_ROOT / "ofl/arefruqaaink/ArefRuqaaInk-Regular.ttf", "aref.svg"),
+    ("﴿صباغ﴾", _REPO_ROOT / "ofl/arefruqaaink/ArefRuqaaInk-Regular.ttf", "aref.svg"),
 )
 
 
@@ -141,7 +141,6 @@ def _add_id_prefix(el, prefix):
         match = re.match(r"^url[(]#(.+)[)]$", fill)
         assert match, fill
         filled.attrib["fill"] = f"url(#{prefix}{match.group(1)})"
-        print(fill, "=>", filled.attrib["fill"])
 
 
 def _svg_of_seq(font_path, text):
