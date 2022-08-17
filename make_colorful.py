@@ -55,6 +55,10 @@ for text, font_path, dest_file, color_fn in _NEED_SVG:
     for dim in ("width", "height"):
         svg.svg_root.attrib[dim] = _strip_pt(svg.svg_root.attrib[dim]) 
 
+    # delete the backdrop rect
+    bd = svg.xpath_one("//svg:g[@id='surface1']/svg:rect")
+    bd.getparent().remove(bd)
+
     with open(dest_file, "w") as f:
         f.write(svg.tostring(pretty_print=True))
     print(f"Wrote {dest_file} with {text} from {font_path}")
