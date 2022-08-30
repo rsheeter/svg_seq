@@ -15,7 +15,7 @@ _XLINK_HREF_ATTR = f"{{{xlinkns()}}}href"  # ease of use: 10/10
 
 
 _REPO_ROOT = Path.home() / "oss/fonts"
-_HB_SHAPE = Path.home() / "oss/harfbuzz/build/util/hb-shape"
+_HB_SHAPE = Path.home() / "oss/harfbuzz/util/hb-shape"
 _PARSE_GLYPH = re.compile(r"^(\d+)(?:@(-?\d+),(-?\d+))?[+](\d+)$")
 
 assert _REPO_ROOT.is_dir()
@@ -23,8 +23,11 @@ assert _HB_SHAPE.is_file()
 
 
 _NEED_SVG = (
-    ("abc", Path(__file__).parent / "build/Font.ttf", "abc.svg"),
-    ("﴿صباغ﴾", _REPO_ROOT / "ofl/arefruqaaink/ArefRuqaaInk-Regular.ttf", "aref.svg"),
+    # ("abc", Path(__file__).parent / "build/Font.ttf", "abc.svg", None),
+    ("﴿صباغ﴾", _REPO_ROOT / "ofl/arefruqaaink/ArefRuqaaInk-Regular.ttf", "aref.svg", None),
+    ("﴾﴿", _REPO_ROOT / "ofl/arefruqaaink/ArefRuqaaInk-Regular.ttf", "ornate-brackets.svg", 4.2),
+    # ("🏳️‍⚧️", _REPO_ROOT / "ofl/notocoloremoji/NotoColorEmoji-Regular.ttf", "transgender-flag.svg", 4.2),
+    # ("🥭", _REPO_ROOT / "ofl/notocoloremoji/NotoColorEmoji-Regular.ttf", "mango.svg", 4.2),
 )
 
 
@@ -85,14 +88,21 @@ def _transform_rect(rect, transform):
     return result
 
 
-def _bbox(svg):
+def first_not_none(*values):
+    for value in values:
+        if value is not None:
+            return value
+    raise ValueError("Only None")
+
+
+def _bbox(svg, add_markers=False):
     # figure out bbox of the whole mess
-    minx = miny = maxx = maxy = 0
+    minx = miny = maxx = maxy = None
     bbox_by_id = {}
     for context in svg.breadth_first():
+        transforms = [context.transform]
         if context.is_shape():
             shape = from_element(context.element)
-            shape = shape.apply_transform(context.transform)
             bbox = shape.bounding_box()
 
             if "id" in context.element.attrib:
@@ -111,19 +121,52 @@ def _bbox(svg):
             use_of = use_of[1:]
             assert use_of in bbox_by_id, f"picosvg use should be of a shape we see before the <use>, what is {use_of}"
             bbox = bbox_by_id[use_of]
+
+            transform = Affine2D.identity()
+
+            x = float(context.element.attrib.get("x", 0))
+            y = float(context.element.attrib.get("y", 0))
+            if (x, y) != (0, 0):
+                 transform = Affine2D.identity().translate(x, y)
+                 print("  ", "mv", (x,y))
+
+            if "transform" in context.element.attrib:
+                print("  ", Affine2D.fromstring(context.element.attrib["transform"]))
+                transform = Affine2D.compose_ltr((transform, Affine2D.fromstring(context.element.attrib["transform"])))
+
+            if transform != Affine2D.identity():
+                transforms.insert(0, transform)
+            del transform
+
         elif not context.is_shape():
             continue  # only shapes and use of shapes consume space
 
-        bbox = _transform_rect(bbox, context.transform)
+        transform = Affine2D.compose_ltr(transforms)
+        bbox = _transform_rect(bbox, transform)
+
         x, y, w, h = bbox
 
-        minx = min(x, minx)
-        miny = min(y, miny)
-        maxx = max(x + w, maxx)
-        maxy = max(y + h, maxy)
+        minx = min(x, first_not_none(minx, x))
+        miny = min(y, first_not_none(miny, y))
+        maxx = max(x + w, first_not_none(maxx, x + w))
+        maxy = max(y + h, first_not_none(maxy, y + h))
+
+        if add_markers:
+            bbox_rect = _svg_rect(bbox)
+            bbox_rect.attrib["opacity"] = "0.1"
+            svg.svg_root.append(bbox_rect)
 
         del bbox  # surely nobody would ever accidentally use the wrong box...
     return Rect(minx, miny, maxx - minx, maxy - miny)
+
+
+def _svg_rect(box: Rect) -> etree.Element:
+    svg_rect = etree.Element("rect")
+    svg_rect.attrib["x"] = ntos(box.x)
+    svg_rect.attrib["y"] = ntos(box.y)
+    svg_rect.attrib["width"] = ntos(box.w)
+    svg_rect.attrib["height"] = ntos(box.h)
+    return svg_rect
 
 
 def _add_id_prefix(el, prefix):
@@ -138,12 +181,13 @@ def _add_id_prefix(el, prefix):
     for filled in el.xpath(f"//*[@fill]"):
         assert "fill" in filled.attrib, filled.attrib.keys()
         fill = filled.attrib["fill"]
-        match = re.match(r"^url[(]#(.+)[)]$", fill)
-        assert match, fill
-        filled.attrib["fill"] = f"url(#{prefix}{match.group(1)})"
+        if fill.startswith("url("):
+            match = re.match(r"^url[(]#(.+)[)]$", fill)
+            assert match, fill
+            filled.attrib["fill"] = f"url(#{prefix}{match.group(1)})"
 
 
-def _svg_of_seq(font_path, text):
+def _svg_of_seq(font_path, text, target_w_to_h):
     font = TTFont(font_path)
     upem = font["head"].unitsPerEm
     assert "SVG " in font
@@ -151,7 +195,8 @@ def _svg_of_seq(font_path, text):
     # Add a bogus use so the xmlns:xlink isn't discarded as unnecessary
     svg = SVG.fromstring(
         """
-        <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" viewBox="TBD">
+        <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" 
+            viewBox="TBD">
             <defs/>
             <use xlink:href="meh"/>
         </svg>
@@ -187,11 +232,11 @@ def _svg_of_seq(font_path, text):
         # don't copy defs repeatedly if we use many glyphs from the same svg table entry
         defs_key = ("defs", svg_table_entry.startGlyphID, svg_table_entry.endGlyphID)
         if defs_key not in added:
-            defs_to_copy = svg_for_gid.xpath_one("//svg:defs")
+            defs_to_copy = svg_for_gid.xpath("//svg:defs")
             for def_el in defs_to_copy:
                 def_el = copy.deepcopy(def_el)
                 _add_id_prefix(def_el, id_prefix)
-                defs.append(def_el)
+                defs.extend(def_el)
             added.add(defs_key)
 
         el_for_gid = svg_for_gid.xpath_one(f"//svg:g[@id='glyph{gid}']")
@@ -204,16 +249,28 @@ def _svg_of_seq(font_path, text):
 
     # make a viewBox that fits our shapes. While we're at it, lets make it start from 0,0.
     viewbox = _bbox(svg)
-    container_transform = Affine2D.identity().translate(-viewbox.x, -viewbox.y)
-    container.attrib["transform"] = container_transform.tostring()
-    viewbox = _transform_rect(viewbox, container_transform)
+    print(viewbox)
+
+    shift = 0
+    w_to_h = viewbox.w / viewbox.h
+    if target_w_to_h and target_w_to_h > w_to_h:
+        new_w = int(viewbox.w * target_w_to_h / w_to_h)
+        shift = (new_w - viewbox.w) / 2
+        viewbox = viewbox._replace(w=new_w)
+
+    container.attrib["transform"] = Affine2D.identity().translate(shift - viewbox.x, -viewbox.y).tostring()
+    viewbox = _transform_rect(viewbox, Affine2D.identity().translate(-viewbox.x, -viewbox.y))
     assert viewbox[:2] == (0, 0), viewbox
     svg.svg_root.attrib["viewBox"] = " ".join(ntos(v) for v in viewbox)
 
+    _bbox(svg, add_markers=True)
+    #viewbox = _bbox(svg)
+    #svg.svg_root.insert(1, _svg_rect(viewbox))
+
     return svg
 
-for text, font_path, dest_file in _NEED_SVG:
-    dest_svg = _svg_of_seq(font_path, text)
+for text, font_path, dest_file, target_w_to_h in _NEED_SVG:
+    dest_svg = _svg_of_seq(font_path, text, target_w_to_h)
     with open(dest_file, "w") as f:
         f.write(dest_svg.tostring(pretty_print=True))
     print(f"Wrote {dest_file} with {text} from {font_path}")
